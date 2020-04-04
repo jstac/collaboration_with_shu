@@ -15,14 +15,14 @@ jupyter:
 
 ### Collaboration's notice
 
-1. This version is still not working.
+1. This version works but takes too much time to converge.
 
 2. Improvements compared with V0.1:
    - Break the function ``egm_factory`` into two functions ``optimal_c`` and ``K``.
    - Convert it into ``MyST-md`` format by ``jupytext``.
 
 3. Fault:
-   - It fails to converge.
+   - It takes too much time to converge.
 
 4. Solution:
    - Check the growth assumption of $\beta_t$ and $G \beta_t$.
@@ -146,7 +146,7 @@ def K(c, ifp):
 def solve_model(ifp,
                 K,
                 tol=1e-2,
-                max_iter=100,
+                max_iter=1e3,
                 verbose=True,
                 print_skip=4):
 
