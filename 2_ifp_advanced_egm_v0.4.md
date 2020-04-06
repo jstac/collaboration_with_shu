@@ -13,19 +13,23 @@ jupyter:
     name: python3
 ---
 
+<!-- #region -->
 ### Collaboration's notice
 
-1. This version works but takes too much time to converge.
 
-2. Improvements compared with V0.1:
+1. Improvements compared with V0.1:
    - Break the function ``egm_factory`` into two functions ``optimal_c`` and ``K``.
    - Convert it into ``MyST-md`` format by ``jupytext``.
+   - Adjust the coefficient of $P$ and $\sigma$_vec and $\mu$-vec.
+   - Converging time is shorter.
+   - Add assumption testings.
 
-3. Fault:
-   - It takes too much time to converge.
+2. Fault:
+   - It still takes too much time to converge.
 
-4. Solution:
-   - Check the growth assumption of $\beta_t$ and $G \beta_t$.
+3. Solution:
+   - Adjust the coefficients of $P$ and $\sigma$_vec and $\mu$-vec.
+<!-- #endregion -->
 
 ```python
 import numpy as np
@@ -41,8 +45,9 @@ from quantecon.optimize.root_finding import brentq
 ifp_data = [
     ('γ', float64),              # Utility parameter 
     ('P', float64[:, :]),        # Transition probs for z_t
-    ('σ_vec', float64[:]),       # Shock scale parameters for R_t
-    ('a_grid', float64[:]),        # Grid over asset values (array)
+    ('σ_vec', float64[:]),       # Shock scale parameters for R_t, β_t, Y
+    ('μ_vec', float64[:]),       
+    ('a_grid', float64[:]),      # Grid over asset values (array)
     ('s_grid', float64[:]),
     ('ε_draws', float64[:]),
     ('η_draws', float64[:]),     # Draws of innovation η for MC (array)
@@ -61,7 +66,8 @@ class IFP:
                  γ=2.5,                        
                  P=np.array([(0.8, 0.2), 
                              (0.7, 0.3)]),
-                 σ_vec=np.array((0.0, 0.5)),
+                 σ_vec=np.array((0.0, -3.26)),
+                 μ_vec=np.array((0.0, 0.025)),
                  shock_draw_size=400,
                  grid_max=10,
                  grid_size=20):
@@ -69,7 +75,7 @@ class IFP:
         np.random.seed(1234)  # arbitrary seed
 
         self.γ = γ
-        self.P, self.σ_vec = P, σ_vec
+        self.P, self.σ_vec, self.μ_vec = P, σ_vec, μ_vec
         self.ε_draws = np.random.randn(shock_draw_size)
         self.η_draws = np.random.randn(shock_draw_size)
         self.ζ_draws = np.random.randn(shock_draw_size)
@@ -85,13 +91,13 @@ class IFP:
         return du ** (-1 / self.γ)
     
     def β(self, z, ε):
-        return np.exp(self.σ_vec[z] * ε)
+        return np.exp(self.σ_vec[z] * ε + self.μ_vec[z])
     
     def R(self, z, ζ):
-        return np.exp(self.σ_vec[z] * ζ)
+        return np.exp(self.σ_vec[z] * ζ + self.μ_vec[z])
     
     def Y(self, z, η):
-        return np.exp(self.σ_vec[z] * η)
+        return np.exp(self.σ_vec[z] * η + self.μ_vec[z])
 ```
 
 ```python
@@ -192,11 +198,53 @@ c = solve_model(ifp, K)
 ```
 
 ```python
+for z in [0, 1]:
+    plt.plot(ifp.a_grid, c[:, z], label=f"$z$ = {z}")
 
+plt.legend()
+plt.show()
+```
+
+## Testing the assumptions
+
+```python
+@njit
+def growth_condition_beta(ifp):
+    u_prime, u_prime_inv = ifp.u_prime, ifp.u_prime_inv
+    a_grid, s_grid = ifp.a_grid, ifp.s_grid
+    η_draws, ζ_draws, ε_draws = ifp.η_draws, ifp.ζ_draws, ifp.ε_draws
+    n = len(ε_draws)
+    β, R, Y, P = ifp.β, ifp.R, ifp.Y, ifp.P
+    
+    β_prod = np.ones(n)
+    for z_hat in (0, 1):
+        for t in range(n):
+            β_prod[t+1] = β(z_hat, ε_draws[t+1]) * β_prod[t]
+    return β_prod[n] ** (1/n) 
 ```
 
 ```python
+growth_condition_beta(ifp)
+```
 
+```python
+@njit
+def growth_condition_betaR(ifp):
+    u_prime, u_prime_inv = ifp.u_prime, ifp.u_prime_inv
+    a_grid, s_grid = ifp.a_grid, ifp.s_grid
+    η_draws, ζ_draws, ε_draws = ifp.η_draws, ifp.ζ_draws, ifp.ε_draws
+    n = len(ε_draws)
+    β, R, Y, P = ifp.β, ifp.R, ifp.Y, ifp.P
+    
+    βR_prod = np.ones(n)
+    for z_hat in (0, 1):
+        for t in range(n):
+            βR_prod[t+1] = β(z_hat, ε_draws[t+1]) * R(z_hat, ζ_draws[t+1]) * βR_prod[t]
+    return βR_prod[n] ** (1/n) 
+```
+
+```python
+growth_condition_betaR(ifp)
 ```
 
 ```python
