@@ -21,14 +21,15 @@ jupyter:
    - Break the function ``egm_factory`` into two functions ``optimal_c`` and ``K``.
    - Convert it into ``MyST-md`` format by ``jupytext``.
    - Adjust the coefficient of $P$ and $\sigma$_vec and $\mu$-vec.
-   - Converging time is shorter.
+   - Converging time is **much shorter**.
    - Add assumption testings.
+   - Change the loop structure.
 
 2. Fault:
-   - It still takes too much time to converge.
+   - The assumption testing is still not on the money.
 
 3. Solution:
-   - Adjust the coefficients of $P$ and $\sigma$_vec and $\mu$-vec.
+   - Simulate the AR(1) Z and refer to section 4 &5 in John & Qingyin's paper.
 <!-- #endregion -->
 
 ```python
@@ -66,8 +67,8 @@ class IFP:
                  γ=2.5,                        
                  P=np.array([(0.8, 0.2), 
                              (0.7, 0.3)]),
-                 σ_vec=np.array((0.0, -3.26)),
-                 μ_vec=np.array((0.0, 0.025)),
+                 σ_vec=np.array((0.0, -3.25)),
+                 μ_vec=np.array((0.0, 0.03)),
                  shock_draw_size=400,
                  grid_max=10,
                  grid_size=20):
@@ -101,108 +102,7 @@ class IFP:
 ```
 
 ```python
-@njit
-def optimal_c(s, z, σ_vec, ifp):
-    
-    u_prime, u_prime_inv = ifp.u_prime, ifp.u_prime_inv
-    a_grid, s_grid = ifp.a_grid, ifp.s_grid
-    η_draws, ζ_draws, ε_draws = ifp.η_draws, ifp.ζ_draws, ifp.ε_draws
-    β, R, Y, P = ifp.β, ifp.R, ifp.Y, ifp.P
-    
-    
-    c = lambda a, z: interp(a_grid, σ_vec[:, z], a)
-        
-    Ez = 0.0
-    for z_hat in (0, 1):
-        for η in η_draws:
-            for ζ in ζ_draws:
-                for ε in ε_draws:
-                    β_hat = β(z_hat, ε)
-                    R_hat = R(z_hat, ζ)
-                    Y_hat = Y(z_hat, η)
-                    Ez += β_hat * R_hat * u_prime(c(R_hat * s + Y_hat, z_hat)) * P[z, z_hat]
-                
-    Ez = Ez / (len(η_draws) * len(ζ_draws) * len(ε_draws))
-    return u_prime_inv(Ez)
-    
-```
-
-```python
-@njit
-def K(c, ifp):
-    
-    a_grid, s_grid = ifp.a_grid, ifp.s_grid
-    
-    c_new = np.empty_like(c)
-    for z in (0, 1):
-        for i in range(len(s_grid)):
-            s = s_grid[i]
-            
-            c_new[i, z] = optimal_c(s, z, c, ifp)
-            
-        a_new = c_new[:, z] + s_grid
-        c_new[:, z] = interp(a_new, c_new[:, z], a_grid)
-        
-        c_new[:, z] = np.minimum(c_new[:, z], a_grid)
-        
-    return c_new
-```
-
-```python
-def solve_model(ifp,
-                K,
-                tol=1e-2,
-                max_iter=1e3,
-                verbose=True,
-                print_skip=4):
-
-    """
-    Solves for the optimal policy using operator K
-
-    * ifp is an instance of ConsumerProblem
-    * K is an operator that updates consumption policy
-    """
-
-    # Initial guess of c_vec = consume all assets
-    n = len(ifp.a_grid)
-    c = np.empty((n, 2))
-    for z in 0, 1:
-        c[:, z] = ifp.a_grid
-
-    i = 0
-    error = tol + 1
-
-    while i < max_iter and error > tol:
-        c_new = K(c, ifp)
-
-        error = np.max(np.abs(c - c_new))
-        i += 1
-
-        if verbose and i % print_skip == 0:
-            print(f"Error at iteration {i} is {error}.")
-
-        c[:, :] = c_new
-
-    if i == max_iter:
-        print("Failed to converge!")
-
-    if verbose and i < max_iter:
-        print(f"\nConverged in {i} iterations.")
-
-    return c
-```
-
-```python
 ifp = IFP()
-c = solve_model(ifp, K)
-```
-
-```python
-for z in [0, 1]:
-    plt.plot(ifp.a_grid, c[:, z], label=f"$z$ = {z}")
-
-plt.legend()
-plt.show()
 ```
 
 ## Testing the assumptions
@@ -245,6 +145,115 @@ def growth_condition_betaR(ifp):
 
 ```python
 growth_condition_betaR(ifp)
+```
+
+## Implement the endogenous grid method
+
+```python
+@jit(nopython=True)
+def optimal_c(s, z, σ_vec, ifp):
+    
+    u_prime, u_prime_inv = ifp.u_prime, ifp.u_prime_inv
+    a_grid, s_grid = ifp.a_grid, ifp.s_grid
+    η_draws, ζ_draws, ε_draws = ifp.η_draws, ifp.ζ_draws, ifp.ε_draws
+    β, R, Y, P = ifp.β, ifp.R, ifp.Y, ifp.P
+    n = len(ε_draws)
+    
+    c = lambda a, z: interp(a_grid, σ_vec[:, z], a)
+        
+    Ez = 0.0
+    for z_hat in (0, 1):
+        for i in range(n):
+            β_hat = β(z_hat, ε_draws[i])
+            R_hat = R(z_hat, ζ_draws[i])
+            Y_hat = Y(z_hat, η_draws[i])
+            Ez += β_hat * R_hat * u_prime(c(R_hat * s + Y_hat, z_hat)) * P[z, z_hat]
+                
+    Ez = Ez / (n ** 3)
+    return u_prime_inv(Ez)
+    
+```
+
+```python
+@jit(nopython=True)
+def K(c, ifp):
+    
+    a_grid, s_grid = ifp.a_grid, ifp.s_grid
+    
+    c_new = np.empty_like(c)
+    for z in (0, 1):
+        for i in range(len(s_grid)):
+            s = s_grid[i]
+            
+            c_new[i, z] = optimal_c(s, z, c, ifp)
+            
+        a_new = c_new[:, z] + s_grid
+        c_new[:, z] = interp(a_new, c_new[:, z], a_grid)
+        
+        c_new[:, z] = np.minimum(c_new[:, z], a_grid)
+        
+    return c_new
+```
+
+```python
+def solve_model(ifp,
+                K,
+                tol=1e-3,
+                max_iter=1e3,
+                verbose=True,
+                print_skip=4):
+
+    """
+    Solves for the optimal policy using operator K
+
+    * ifp is an instance of ConsumerProblem
+    * K is an operator that updates consumption policy
+    """
+
+    # Initial guess of c_vec = consume all assets
+    n = len(ifp.a_grid)
+    c = np.empty((n, 2))
+    for z in 0, 1:
+        c[:, z] = ifp.a_grid
+
+    i = 0
+    error = tol + 1
+
+    while i < max_iter and error > tol:
+        c_new = K(c, ifp)
+
+        error = np.max(np.abs(c - c_new))
+        i += 1
+
+        if verbose and i % print_skip == 0:
+            print(f"Error at iteration {i} is {error}.")
+
+        c[:, :] = c_new
+
+    if i == max_iter:
+        print("Failed to converge!")
+
+    if verbose and i < max_iter:
+        print(f"\nConverged in {i} iterations.")
+
+    return c
+```
+
+```python
+%%time
+c = solve_model(ifp, K)
+```
+
+```python
+for z in [0, 1]:
+    plt.plot(ifp.a_grid, c[:, z], label=f"$z$ = {z}")
+
+plt.legend()
+plt.show()
+```
+
+```python
+
 ```
 
 ```python
