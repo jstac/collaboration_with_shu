@@ -23,13 +23,15 @@ jupyter:
    - Adjust the coefficient of $P$ and $\sigma$_vec and $\mu$-vec.
    - Converging time is **much shorter**.
    - Add assumption testings.
+     - The assumption testing is on the money.
    - Change the loop structure.
 
 2. Fault:
-   - The assumption testing is still not on the money.
+   - $\beta$ is not stochastic/state dependent.
 
 3. Solution:
-   - Simulate the AR(1) Z and refer to section 4 &5 in John & Qingyin's paper.
+   - Simulate z_vec and P_z from the AR(1) $Z_t$ by using the function ``rouwenhorst`` in the ``QuantEcon.py``.
+   - Set up appropriate expressions of stochastic processes, $\beta_t(z_t, ε_t)$, $R_t(z_t, ζ_t)$ and $Y_t(z_t, η_t)$.
 <!-- #endregion -->
 
 ```python
@@ -38,16 +40,17 @@ import matplotlib.pyplot as plt
 from interpolation import interp
 from numba import jit, njit, jitclass, prange, float64
 from quantecon.optimize.root_finding import brentq
+from scipy.linalg import eig, eigvals
 
 %matplotlib inline
 ```
 
 ```python
 ifp_data = [
-    ('γ', float64),              # Utility parameter 
+    ('γ', float64),              # Utility parameter
+    ('β', float64),
     ('P', float64[:, :]),        # Transition probs for z_t
-    ('σ_vec', float64[:]),       # Shock scale parameters for R_t, β_t, Y
-    ('μ_vec', float64[:]),       
+    ('z_vec', float64[:]),       # Shock scale parameters for R_t, Y_t     
     ('a_grid', float64[:]),      # Grid over asset values (array)
     ('s_grid', float64[:]),
     ('ε_draws', float64[:]),
@@ -64,11 +67,11 @@ class IFP:
     problem. 
     """
     def __init__(self,
-                 γ=2.5,                        
-                 P=np.array([(0.8, 0.2), 
-                             (0.7, 0.3)]),
-                 σ_vec=np.array((0.0, -3.25)),
-                 μ_vec=np.array((0.0, 0.03)),
+                 γ=2.5,
+                 β=0.96,
+                 P=np.array([(0.7861, 0.2139), 
+                             (0.2139, 0.7861)]),
+                 z_vec=np.array((0.0316, 0.047)),
                  shock_draw_size=400,
                  grid_max=10,
                  grid_size=20):
@@ -76,7 +79,8 @@ class IFP:
         np.random.seed(1234)  # arbitrary seed
 
         self.γ = γ
-        self.P, self.σ_vec, self.μ_vec = P, σ_vec, μ_vec
+        self.β = β
+        self.P, self.z_vec = P, z_vec
         self.ε_draws = np.random.randn(shock_draw_size)
         self.η_draws = np.random.randn(shock_draw_size)
         self.ζ_draws = np.random.randn(shock_draw_size)
@@ -91,14 +95,11 @@ class IFP:
     def u_prime_inv(self, du):
         return du ** (-1 / self.γ)
     
-    def β(self, z, ε):
-        return np.exp(self.σ_vec[z] * ε + self.μ_vec[z])
-    
     def R(self, z, ζ):
-        return np.exp(self.σ_vec[z] * ζ + self.μ_vec[z])
+        return np.exp(self.z_vec[z] * ζ)
     
     def Y(self, z, η):
-        return np.exp(self.σ_vec[z] * η + self.μ_vec[z])
+        return np.exp(self.z_vec[z] * η )
 ```
 
 ```python
@@ -108,43 +109,21 @@ ifp = IFP()
 ## Testing the assumptions
 
 ```python
-@njit
-def growth_condition_beta(ifp):
-    u_prime, u_prime_inv = ifp.u_prime, ifp.u_prime_inv
-    a_grid, s_grid = ifp.a_grid, ifp.s_grid
-    η_draws, ζ_draws, ε_draws = ifp.η_draws, ifp.ζ_draws, ifp.ε_draws
-    n = len(ε_draws)
-    β, R, Y, P = ifp.β, ifp.R, ifp.Y, ifp.P
+def G_φ(Z_φ, P_φ):
     
-    β_prod = np.ones(n)
-    for z_hat in (0, 1):
-        for t in range(n):
-            β_prod[t+1] = β(z_hat, ε_draws[t+1]) * β_prod[t]
-    return β_prod[n] ** (1/n) 
-```
-
-```python
-growth_condition_beta(ifp)
-```
-
-```python
-@njit
-def growth_condition_betaR(ifp):
-    u_prime, u_prime_inv = ifp.u_prime, ifp.u_prime_inv
-    a_grid, s_grid = ifp.a_grid, ifp.s_grid
-    η_draws, ζ_draws, ε_draws = ifp.η_draws, ifp.ζ_draws, ifp.ε_draws
-    n = len(ε_draws)
-    β, R, Y, P = ifp.β, ifp.R, ifp.Y, ifp.P
+    D_φ = np.diag(Z_φ)
+    if D_φ.max() == np.inf:
+        G_R = np.nan
+    else:
+        L_φ = np.matmul(P_φ, D_φ)
+        G_φ = max(np.abs(eig(L_φ)[0])) # G_φ = r(L_φ)
     
-    βR_prod = np.ones(n)
-    for z_hat in (0, 1):
-        for t in range(n):
-            βR_prod[t+1] = β(z_hat, ε_draws[t+1]) * R(z_hat, ζ_draws[t+1]) * βR_prod[t]
-    return βR_prod[n] ** (1/n) 
+    return G_φ
 ```
 
 ```python
-growth_condition_betaR(ifp)
+G_βR = G_φ(ifp.β * np.exp(ifp.z_vec + (ifp.z_vec)**2 /2), ifp.P)
+G_βR
 ```
 
 ## Implement the endogenous grid method
@@ -164,10 +143,9 @@ def optimal_c(s, z, σ_vec, ifp):
     Ez = 0.0
     for z_hat in (0, 1):
         for i in range(n):
-            β_hat = β(z_hat, ε_draws[i])
             R_hat = R(z_hat, ζ_draws[i])
             Y_hat = Y(z_hat, η_draws[i])
-            Ez += β_hat * R_hat * u_prime(c(R_hat * s + Y_hat, z_hat)) * P[z, z_hat]
+            Ez += β * R_hat * u_prime(c(R_hat * s + Y_hat, z_hat)) * P[z, z_hat]
                 
     Ez = Ez / (n ** 3)
     return u_prime_inv(Ez)
@@ -198,7 +176,7 @@ def K(c, ifp):
 ```python
 def solve_model(ifp,
                 K,
-                tol=1e-3,
+                tol=1e-10,
                 max_iter=1e3,
                 verbose=True,
                 print_skip=4):
